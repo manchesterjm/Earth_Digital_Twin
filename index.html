@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Earth Digital Twin — Space to Street</title>
+    <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Widgets/widgets.css">
+    <link rel="stylesheet" href="styles.css">
+    <script>window.CESIUM_BASE_URL = 'https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/';</script>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Cesium.js"></script>
+</head>
+<body>
+    <div id="cesiumContainer"></div>
+
+    <div id="topbar">
+        <div class="brand">
+            <span class="dot"></span>
+            <span>Earth Digital Twin</span>
+        </div>
+        <div class="search-wrap">
+            <input id="searchInput" type="text" placeholder="Search a place (e.g., Colorado Springs, Eiffel Tower, Times Square)" autocomplete="off">
+            <button id="searchBtn">Go</button>
+        </div>
+        <div class="presets">
+            <button data-preset="space">Space</button>
+            <button data-preset="cosprings">Colorado Springs</button>
+            <button data-preset="nyc">New York</button>
+            <button data-preset="london">London</button>
+            <button data-preset="tokyo">Tokyo</button>
+            <button data-preset="paris">Paris</button>
+            <button data-preset="dubai">Dubai</button>
+            <button data-preset="sf">San Francisco</button>
+        </div>
+    </div>
+
+    <div id="hud">
+        <div class="hud-row"><span class="lbl">Lat:</span><span id="hudLat">–</span></div>
+        <div class="hud-row"><span class="lbl">Lon:</span><span id="hudLon">–</span></div>
+        <div class="hud-row"><span class="lbl">Alt:</span><span id="hudAlt">–</span></div>
+        <div class="hud-row"><span class="lbl">FPS:</span><span id="hudFps">–</span></div>
+        <div class="hud-row"><span class="lbl">Tiles:</span><span id="hudTiles">0</span></div>
+        <div class="hud-row"><span class="lbl">Bldgs:</span><span id="hudBldgs">0</span></div>
+    </div>
+
+    <div id="controls">
+        <details open>
+            <summary>Layers</summary>
+            <label><input type="checkbox" id="toggleBuildings" checked> 3D Buildings (OSM)</label>
+            <label><input type="checkbox" id="toggleAtmos" checked> Atmosphere</label>
+            <label><input type="checkbox" id="toggleLighting" checked> Sun Lighting (Day/Night)</label>
+            <label><input type="checkbox" id="toggleStars" checked> Stars / Skybox</label>
+            <label><input type="checkbox" id="toggleFog"> Distance Fog</label>
+        </details>
+        <details>
+            <summary>Imagery</summary>
+            <label><input type="radio" name="imagery" value="esri" checked> Esri World Imagery (default)</label>
+            <label><input type="radio" name="imagery" value="osm"> OpenStreetMap</label>
+            <label><input type="radio" name="imagery" value="bing"> Bing Aerial (needs Ion token)</label>
+        </details>
+        <details>
+            <summary>Time</summary>
+            <label>Sun position
+                <input type="range" id="sunSlider" min="0" max="86400" value="43200">
+            </label>
+            <button id="nowBtn">Now (real time)</button>
+        </details>
+        <details>
+            <summary>Cesium Ion (optional)</summary>
+            <p class="muted">Optional — adds Cesium World Terrain + global 3D Tiles buildings. Get a free token at <a href="https://cesium.com/ion/signup" target="_blank">cesium.com/ion/signup</a>.</p>
+            <input id="ionToken" type="password" placeholder="Paste your Ion access token">
+            <button id="ionApply">Apply</button>
+            <button id="ionClear">Clear</button>
+        </details>
+        <details>
+            <summary>About</summary>
+            <p class="muted">Open-source 3D Earth viewer. Imagery © Esri, Maxar, Earthstar Geographics, OSM contributors. Buildings © OpenStreetMap contributors via Overpass API. Engine: CesiumJS (Apache 2.0).</p>
+        </details>
+    </div>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <div id="loadingText">Loading Earth…</div>
+    </div>
+
+    <div id="toast"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
