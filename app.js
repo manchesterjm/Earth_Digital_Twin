@@ -21,9 +21,11 @@ const CONFIG = {
     // Building loader
     BUILDING_TILE_DEG: 0.01,            // ~1.1 km tiles at equator
     BUILDING_ACTIVE_ALT: 5000,          // meters above ground; load when below this
-    BUILDING_MAX_TILES: 96,             // cache cap
-    BUILDING_MAX_CONCURRENT: 2,         // parallel Overpass requests
+    BUILDING_MAX_TILES: 128,            // cache cap (incl. prefetch ring)
+    BUILDING_MAX_CONCURRENT: 3,         // parallel Overpass requests (Overpass slot limit is 2; 3 works in short bursts)
     BUILDING_MAX_AREA_DEG: 0.06,        // cap visible building search to this size
+    BUILDING_PREFETCH_RING: true,       // load 1 tile ring around visible area for pan responsiveness
+    BUILDING_PREFETCH_MAX_TOTAL: 25,    // skip ring if visible+ring would exceed this
     OVERPASS_ENDPOINTS: [
         'https://overpass-api.de/api/interpreter',
         'https://overpass.kumi.systems/api/interpreter',
@@ -56,7 +58,8 @@ class OsmBuildingLoader {
         this.tilesByKey = new Map();     // key -> { primitive, count, lastSeen, empty }
         this.pendingTiles = new Set();
         this.activeTiles = new Set();
-        this.queue = [];
+        this.queue = [];                  // visible tiles (high priority)
+        this.preloadQueue = [];           // ring tiles (low priority)
         this.endpointIdx = 0;
         this.totalBuildings = 0;
         this.enabled = true;
@@ -87,22 +90,51 @@ class OsmBuildingLoader {
             return;
         }
 
-        const tilesNeeded = this.computeVisibleTiles();
+        const visible = this.computeVisibleTiles();
+        const preload = this.computePrefetchRing(visible);
 
+        // Show/hide existing tiles based on whether they're currently visible
         for (const [key, entry] of this.tilesByKey) {
-            const needed = tilesNeeded.has(key);
-            if (entry.primitive) entry.primitive.show = needed;
-            if (needed) entry.lastSeen = Date.now();
+            const inVisible = visible.has(key);
+            if (entry.primitive) entry.primitive.show = inVisible;
+            if (inVisible || preload.has(key)) entry.lastSeen = Date.now();
         }
 
-        for (const key of tilesNeeded) {
+        // Queue visible tiles first (high priority)
+        for (const key of visible) {
             if (!this.tilesByKey.has(key) && !this.pendingTiles.has(key)) {
-                this.queueLoad(key);
+                this.queueLoad(key, true);
+            }
+        }
+        // Then queue ring tiles for pre-fetch (low priority)
+        for (const key of preload) {
+            if (!this.tilesByKey.has(key) && !this.pendingTiles.has(key)) {
+                this.queueLoad(key, false);
             }
         }
 
         this.processQueue();
         this.evictIfNeeded();
+    }
+
+    computePrefetchRing(visible) {
+        const preload = new Set();
+        if (!CONFIG.BUILDING_PREFETCH_RING || visible.size === 0) return preload;
+        // Skip if already too many to load
+        if (visible.size + 8 > CONFIG.BUILDING_PREFETCH_MAX_TOTAL) return preload;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const k of visible) {
+            const [tx, ty] = k.split('_').map(Number);
+            minX = Math.min(minX, tx); maxX = Math.max(maxX, tx);
+            minY = Math.min(minY, ty); maxY = Math.max(maxY, ty);
+        }
+        for (let tx = minX - 1; tx <= maxX + 1; tx++) {
+            for (let ty = minY - 1; ty <= maxY + 1; ty++) {
+                const k = `${tx}_${ty}`;
+                if (!visible.has(k)) preload.add(k);
+            }
+        }
+        return preload;
     }
 
     computeVisibleTiles() {
@@ -151,16 +183,25 @@ class OsmBuildingLoader {
         return result;
     }
 
-    queueLoad(key) {
-        if (this.queue.includes(key)) return;
-        this.queue.push(key);
+    queueLoad(key, isVisible) {
+        if (this.queue.includes(key) || this.preloadQueue.includes(key)) return;
+        if (isVisible) this.queue.push(key);
+        else this.preloadQueue.push(key);
         this.pendingTiles.add(key);
+    }
+
+    nextQueuedKey() {
+        // Prefer visible queue, fall back to preload
+        if (this.queue.length > 0) return this.queue.shift();
+        if (this.preloadQueue.length > 0) return this.preloadQueue.shift();
+        return null;
     }
 
     processQueue() {
         if (Date.now() < this._backoffUntil) return;  // Overpass-wide cool-off
-        while (this.activeTiles.size < CONFIG.BUILDING_MAX_CONCURRENT && this.queue.length > 0) {
-            const key = this.queue.shift();
+        while (this.activeTiles.size < CONFIG.BUILDING_MAX_CONCURRENT) {
+            const key = this.nextQueuedKey();
+            if (!key) break;
             if (this.tilesByKey.has(key)) {
                 this.pendingTiles.delete(key);
                 continue;
@@ -207,14 +248,14 @@ class OsmBuildingLoader {
 
         if (!data || !data.elements) {
             this._consecutiveFailures++;
-            if (this._consecutiveFailures >= 3 && !this._failureNoticeShown) {
+            if (this._consecutiveFailures >= 5 && !this._failureNoticeShown) {
                 this._failureNoticeShown = true;
-                this._backoffUntil = Date.now() + 60000;  // 60s cool-off
+                this._backoffUntil = Date.now() + 30000;  // 30s cool-off
                 if (typeof toast === 'function') {
-                    toast('OSM building service is rate-limiting requests. Will retry shortly.', 5000);
+                    toast('OSM building service unreachable (VPN can cause this). Will keep retrying.', 5000);
                 }
             }
-            this.tilesByKey.set(key, { primitive: null, count: 0, lastSeen: Date.now(), empty: true });
+            // Don't cache on failure — let it retry on next camera move
             return;
         }
         this._consecutiveFailures = 0;
@@ -350,8 +391,9 @@ class OsmBuildingLoader {
             geometryInstances: instances,
             appearance: new Cesium.PerInstanceColorAppearance({
                 flat: false,
-                translucent: false,
-                faceForward: true
+                translucent: true,
+                faceForward: true,
+                closed: false
             }),
             asynchronous: true,
             interleave: true,
@@ -370,27 +412,27 @@ class OsmBuildingLoader {
         const bt = (b.tags && b.tags.building) || '';
         const mat = (b.tags && (b.tags['building:material'] || b.tags['roof:material'])) || '';
 
-        // Glass / skyscraper — cool blue tint
+        // Glass / skyscraper — cool blue tint, more translucent (real glass)
         if (b.height > 60 || bt === 'skyscraper' || mat === 'glass') {
-            return new Cesium.Color(0.55 + j*0.5, 0.65 + j*0.5, 0.78 + j*0.5, 1.0);
+            return new Cesium.Color(0.55 + j*0.5, 0.65 + j*0.5, 0.78 + j*0.5, 0.78);
         }
         // Office / commercial mid-rise — neutral light
         if (b.height > 25 || bt === 'office' || bt === 'commercial' || bt === 'apartments') {
-            return new Cesium.Color(0.78 + j, 0.79 + j, 0.81 + j, 1.0);
+            return new Cesium.Color(0.78 + j, 0.79 + j, 0.81 + j, 0.85);
         }
         // Industrial — warmer tan
         if (bt === 'industrial' || bt === 'warehouse' || bt === 'hangar') {
-            return new Cesium.Color(0.74 + j, 0.70 + j, 0.62 + j, 1.0);
+            return new Cesium.Color(0.74 + j, 0.70 + j, 0.62 + j, 0.88);
         }
         // Religious — sandstone
         if (bt === 'church' || bt === 'cathedral' || bt === 'mosque' || bt === 'temple') {
-            return new Cesium.Color(0.82 + j, 0.74 + j, 0.62 + j, 1.0);
+            return new Cesium.Color(0.82 + j, 0.74 + j, 0.62 + j, 0.88);
         }
         // Residential — warm light gray with slight per-house variation
         const baseR = 0.82 + j;
         const baseG = 0.80 + j * 0.95;
         const baseB = 0.76 + j * 0.85;
-        return new Cesium.Color(baseR, baseG, baseB, 1.0);
+        return new Cesium.Color(baseR, baseG, baseB, 0.88);
     }
 
     hideAll() {
@@ -607,10 +649,42 @@ async function main() {
         }
     });
 
-    // Building loader
+    // Building loader (Overpass-based fallback)
     const buildings = new OsmBuildingLoader(viewer);
+    let ionBuildingsTileset = null;
 
-    // Try to attach Cesium World Terrain if a token is present
+    // Load Cesium OSM Buildings 3D Tileset (pre-baked global, fast). Disables Overpass loader on success.
+    async function loadIonBuildings() {
+        if (!Cesium.Ion.defaultAccessToken) return false;
+        if (ionBuildingsTileset) return true;
+        try {
+            const tileset = await Cesium.createOsmBuildingsAsync();
+            // Subtle translucency to match the Overpass-style aesthetic
+            try {
+                tileset.style = new Cesium.Cesium3DTileStyle({
+                    color: "color('#dcd8d2', 0.88)"
+                });
+            } catch (styleErr) { /* style optional */ }
+            scene.primitives.add(tileset);
+            ionBuildingsTileset = tileset;
+            buildings.setEnabled(false);  // disable Overpass loader; tileset is comprehensive
+            toast('Cesium OSM Buildings (global tileset) loaded — instant building streaming worldwide.', 5500);
+            return true;
+        } catch (e) {
+            console.warn('OSM Buildings tileset load failed:', e);
+            return false;
+        }
+    }
+
+    function unloadIonBuildings() {
+        if (ionBuildingsTileset) {
+            scene.primitives.remove(ionBuildingsTileset);
+            ionBuildingsTileset = null;
+        }
+        buildings.setEnabled(document.getElementById('toggleBuildings').checked);
+    }
+
+    // Try to attach Cesium World Terrain + OSM Buildings if a token is present at startup
     if (Cesium.Ion.defaultAccessToken) {
         try {
             const terrain = await Cesium.CesiumTerrainProvider.fromIonAssetId(1);
@@ -619,6 +693,7 @@ async function main() {
         } catch (e) {
             console.warn('Terrain load failed:', e);
         }
+        loadIonBuildings();  // async, don't block startup
     }
 
     // -----------------------------------------------------------------------
@@ -632,7 +707,11 @@ async function main() {
 
     // Layer toggles
     document.getElementById('toggleBuildings').addEventListener('change', e => {
-        buildings.setEnabled(e.target.checked);
+        if (ionBuildingsTileset) {
+            ionBuildingsTileset.show = e.target.checked;
+        } else {
+            buildings.setEnabled(e.target.checked);
+        }
     });
     document.getElementById('toggleAtmos').addEventListener('change', e => {
         scene.skyAtmosphere.show = e.target.checked;
@@ -677,14 +756,17 @@ async function main() {
         try {
             const terrain = await Cesium.CesiumTerrainProvider.fromIonAssetId(1);
             viewer.terrainProvider = terrain;
-            toast('Ion token applied — terrain enabled. Reload for full effect.');
+            toast('Ion token applied — terrain enabled.');
         } catch (e) {
             toast('Ion token rejected: ' + e.message);
+            return;
         }
+        await loadIonBuildings();
     });
     document.getElementById('ionClear').addEventListener('click', () => {
         Cesium.Ion.defaultAccessToken = '';
         localStorage.removeItem(STORAGE_KEY_TOKEN);
+        unloadIonBuildings();
         document.getElementById('ionToken').value = '';
         viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
         toast('Ion token cleared.');
@@ -745,9 +827,14 @@ async function main() {
                 hudAlt.textContent = fmtAlt(carto.height);
             }
             hudFps.textContent = fpsAccum.toFixed(0);
-            const stats = buildings.getStats();
-            hudTiles.textContent = `${stats.tiles}/${stats.cached}`;
-            hudBldgs.textContent = stats.buildings;
+            if (ionBuildingsTileset) {
+                hudTiles.textContent = 'Ion';
+                hudBldgs.textContent = 'global';
+            } else {
+                const stats = buildings.getStats();
+                hudTiles.textContent = `${stats.tiles}/${stats.cached}`;
+                hudBldgs.textContent = stats.buildings;
+            }
         }
         requestAnimationFrame(tick);
     }
