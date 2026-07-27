@@ -24,3 +24,6 @@ node_modules/
 *.log
 .env
 .env.local
+
+# Cesium Ion token (secret — never commit; repo is public)
+ion_token.local.js

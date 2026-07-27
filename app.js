@@ -403,36 +403,18 @@ class OsmBuildingLoader {
     }
 
     colorFor(b) {
-        // Deterministic per-building variation based on first vertex
-        const h = ((b.coords[0][0] * 12.9898 + b.coords[0][1] * 78.233) * 43758.5453);
-        const rnd = h - Math.floor(h);             // 0..1
-        const j = (rnd - 0.5) * 0.16;              // -0.08..+0.08
+        // Height-driven ramp: short buildings start as transparent cyan and shift
+        // toward blue the taller they are. Cyan (0, 1, 1) -> blue (0, 0, 1) is simply
+        // the green channel falling off, so we fade green out as height climbs.
+        const TALL_REFERENCE_M = 150;   // height (m) treated as "fully blue"; taller clamps here
+        const tallness = Math.max(0, Math.min(b.height / TALL_REFERENCE_M, 1)); // 0 = ground, 1 = tall
 
-        // Tag-driven palette
-        const bt = (b.tags && b.tags.building) || '';
-        const mat = (b.tags && (b.tags['building:material'] || b.tags['roof:material'])) || '';
+        const red   = 0.05;                    // kept low so the tint stays a clean cyan/blue
+        const green = 0.90 - 0.80 * tallness;  // 0.90 (cyan) at ground -> 0.10 (blue) when tall
+        const blue  = 1.0;                     // always full blue
+        const alpha = 0.50;                    // translucent — "transparent cyan"
 
-        // Glass / skyscraper — cool blue tint, more translucent (real glass)
-        if (b.height > 60 || bt === 'skyscraper' || mat === 'glass') {
-            return new Cesium.Color(0.55 + j*0.5, 0.65 + j*0.5, 0.78 + j*0.5, 0.78);
-        }
-        // Office / commercial mid-rise — neutral light
-        if (b.height > 25 || bt === 'office' || bt === 'commercial' || bt === 'apartments') {
-            return new Cesium.Color(0.78 + j, 0.79 + j, 0.81 + j, 0.85);
-        }
-        // Industrial — warmer tan
-        if (bt === 'industrial' || bt === 'warehouse' || bt === 'hangar') {
-            return new Cesium.Color(0.74 + j, 0.70 + j, 0.62 + j, 0.88);
-        }
-        // Religious — sandstone
-        if (bt === 'church' || bt === 'cathedral' || bt === 'mosque' || bt === 'temple') {
-            return new Cesium.Color(0.82 + j, 0.74 + j, 0.62 + j, 0.88);
-        }
-        // Residential — warm light gray with slight per-house variation
-        const baseR = 0.82 + j;
-        const baseG = 0.80 + j * 0.95;
-        const baseB = 0.76 + j * 0.85;
-        return new Cesium.Color(baseR, baseG, baseB, 0.88);
+        return new Cesium.Color(red, green, blue, alpha);
     }
 
     hideAll() {
@@ -581,7 +563,9 @@ function fmtLatLon(deg, isLat) {
 // ============================================================================
 
 async function main() {
-    const stored = localStorage.getItem(STORAGE_KEY_TOKEN) || '';
+    // Token precedence: a token the user saved this session (localStorage) wins; otherwise
+    // fall back to the gitignored local default (window.CESIUM_ION_TOKEN from ion_token.local.js).
+    const stored = localStorage.getItem(STORAGE_KEY_TOKEN) || window.CESIUM_ION_TOKEN || '';
     if (stored) {
         Cesium.Ion.defaultAccessToken = stored;
         document.getElementById('ionToken').value = stored;
@@ -661,8 +645,18 @@ async function main() {
             const tileset = await Cesium.createOsmBuildingsAsync();
             // Subtle translucency to match the Overpass-style aesthetic
             try {
+                // Match the Overpass loader's look: translucent cyan at ground level,
+                // shifting toward blue the taller the building (banded on estimated height).
                 tileset.style = new Cesium.Cesium3DTileStyle({
-                    color: "color('#dcd8d2', 0.88)"
+                    color: {
+                        conditions: [
+                            ["${feature['cesium#estimatedHeight']} >= 150", "color('#0a1aff', 0.5)"],
+                            ["${feature['cesium#estimatedHeight']} >= 90",  "color('#0a4dff', 0.5)"],
+                            ["${feature['cesium#estimatedHeight']} >= 60",  "color('#0a80ff', 0.5)"],
+                            ["${feature['cesium#estimatedHeight']} >= 30",  "color('#0ab3ff', 0.5)"],
+                            ["true",                                        "color('#0ae6ff', 0.5)"]
+                        ]
+                    }
                 });
             } catch (styleErr) { /* style optional */ }
             scene.primitives.add(tileset);
